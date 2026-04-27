@@ -1,0 +1,317 @@
+create SCHEMA Duplicates;
+USE schema duplicates;
+select * from bronze.activity_raw;
+show tables in schema silver;
+select * from silver.activity;
+select * from duplicates.activity_exceptions;
+CREATE OR REPLACE TABLE duplicates.CUSTOMERS_EXCEPTIONS AS
+SELECT *
+FROM BRONZE.CUSTOMERS_RAW
+WHERE CUSTOMER_ID IS NULL
+   OR TRIM(CUSTOMER_ID) = ''
+   OR NAME IS NULL
+   OR CITY IS NULL
+   OR TRY_TO_DATE(SIGNUP_DATE) IS NULL;
+
+
+
+CREATE OR REPLACE TABLE duplicates.PRODUCTS_EXCEPTIONS AS
+SELECT *
+FROM BRONZE.PRODUCTS_RAW
+WHERE PRODUCT_ID IS NULL
+   OR TRIM(PRODUCT_ID) = ''
+   OR PRODUCT_NAME IS NULL
+   OR CATEGORY IS NULL
+   OR PRICE IS NULL;
+
+
+CREATE OR REPLACE TABLE duplicates.ORDERS_EXCEPTIONS AS
+SELECT *
+FROM BRONZE.ORDERS_RAW
+WHERE ORDER_ID IS NULL
+   OR CUSTOMER_ID IS NULL
+   OR TOTAL_AMOUNT IS NULL
+   OR TRY_TO_DATE(ORDER_DATE) IS NULL;
+
+
+CREATE OR REPLACE TABLE duplicates.ORDER_ITEMS_EXCEPTIONS AS
+SELECT *
+FROM BRONZE.ORDER_ITEMS_RAW
+WHERE ORDER_ITEM_ID IS NULL
+   OR ORDER_ID IS NULL
+   OR PRODUCT_ID IS NULL
+   OR QUANTITY IS NULL;
+
+
+CREATE OR REPLACE TABLE duplicates.ACTIVITY_EXCEPTIONS AS
+SELECT *
+FROM BRONZE.ACTIVITY_RAW
+WHERE ACTIVITY_ID IS NULL
+   OR CUSTOMER_ID IS NULL
+   OR ACTIVITY_TYPE IS NULL
+   OR ACTIVITY_TIME IS NULL;
+
+
+SELECT * FROM NINJA_DB.duplicates.CUSTOMERS_EXCEPTIONS;
+SELECT * FROM NINJA_DB.duplicates.PRODUCTS_EXCEPTIONS;
+SELECT * FROM NINJA_DB.duplicates.ORDERS_EXCEPTIONS;
+SELECT * FROM NINJA_DB.duplicates.ORDER_ITEMS_EXCEPTIONS;
+SELECT * FROM NINJA_DB.duplicates.ACTIVITY_EXCEPTIONS;
+
+
+   SELECT * FROM NINJA_DB.gold.dim_CUSTOMERs;
+      SELECT * FROM NINJA_DB.gold.dim_date;
+         SELECT * FROM NINJA_DB.gold.dim_products;
+            SELECT * FROM NINJA_DB.gold.fact_order_items;
+               SELECT * FROM NINJA_DB.gold.fact_orders;
+                  SELECT * FROM NINJA_DB.gold.fact_user_activity
+
+
+    SELECT
+    C.CUSTOMER_ID,
+    C.NAME,
+    C.CITY,
+    SUM(O.TOTAL_AMOUNT) AS TOTAL_SPENT
+FROM SILVER.CUSTOMERS C
+JOIN SILVER.ORDERS O
+    ON C.CUSTOMER_ID = O.CUSTOMER_ID
+GROUP BY
+    C.CUSTOMER_ID, C.NAME, C.CITY
+ORDER BY TOTAL_SPENT DESC;
+
+
+USE ROLE ACCOUNTADMIN_ROLE;
+USE WAREHOUSE HACKATHON_WH;
+USE DATABASE NINJA_DB;
+USE SCHEMA GOLD;
+
+-- STEP 1 — DIMENSION TABLES
+
+
+-- DIM_CUSTOMERS
+
+ALTER TABLE GOLD.DIM_CUSTOMERS
+DROP COLUMN valid_to;
+
+
+CREATE OR REPLACE TABLE GOLD.DIM_CUSTOMERS (
+    customer_sk INT AUTOINCREMENT,
+    customer_id STRING,
+    name STRING,
+    city STRING,
+    signup_date DATE,
+
+    valid_from TIMESTAMP,
+    is_active BOOLEAN,
+
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+MERGE INTO GOLD.DIM_CUSTOMERS tgt
+USING NINJA_DB.SILVER.CUSTOMERS src
+ON tgt.customer_id = src.customer_id AND tgt.is_active = TRUE
+
+WHEN MATCHED AND (
+    tgt.name <> src.name OR
+    tgt.city <> src.city
+)
+THEN UPDATE SET
+    tgt.is_active = FALSE,
+    tgt.updated_at = CURRENT_TIMESTAMP()
+
+WHEN NOT MATCHED THEN
+INSERT (
+    customer_id, name, city, signup_date,
+    valid_from, is_active, created_at, updated_at
+)
+VALUES (
+    src.customer_id, src.name, src.city, src.signup_date,
+    CURRENT_TIMESTAMP(), TRUE,
+    CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+);
+
+-- DIM_PRODUCTS
+ALTER TABLE GOLD.DIM_PRODUCTS
+DROP COLUMN valid_to;
+
+CREATE OR REPLACE TABLE GOLD.DIM_PRODUCTS (
+    product_sk INT AUTOINCREMENT,
+    product_id STRING,
+    product_name STRING,
+    category STRING,
+    price NUMBER,
+
+    valid_from TIMESTAMP,
+    is_active BOOLEAN,
+
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+MERGE INTO GOLD.DIM_PRODUCTS tgt
+USING NINJA_DB.SILVER.PRODUCTS src
+ON tgt.product_id = src.product_id AND tgt.is_active = TRUE
+
+WHEN MATCHED AND (
+    tgt.product_name <> src.product_name OR
+    tgt.category <> src.category OR
+    tgt.price <> src.price
+)
+THEN UPDATE SET
+    tgt.is_active = FALSE,
+    tgt.updated_at = CURRENT_TIMESTAMP()
+
+WHEN NOT MATCHED THEN
+INSERT (
+    product_id, product_name, category, price,
+    valid_from, is_active, created_at, updated_at
+)
+VALUES (
+    src.product_id, src.product_name, src.category, src.price,
+    CURRENT_TIMESTAMP(), TRUE,
+    CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+);
+-- STEP 2 — FACT TABLES
+
+-- FACT_ORDERS
+CREATE OR REPLACE TABLE GOLD.FACT_ORDERS (
+    order_id STRING,
+    customer_id STRING,
+    order_date DATE,
+    total_amount NUMBER,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+MERGE INTO GOLD.FACT_ORDERS tgt
+USING NINJA_DB.SILVER.ORDERS src
+ON tgt.order_id = src.order_id
+
+WHEN MATCHED THEN UPDATE SET
+    tgt.customer_id = src.customer_id,
+    tgt.order_date = src.order_date,
+    tgt.total_amount = src.total_amount,
+    tgt.updated_at = CURRENT_TIMESTAMP()
+
+WHEN NOT MATCHED THEN
+INSERT (
+    order_id, customer_id, order_date,
+    total_amount, created_at, updated_at
+)
+VALUES (
+    src.order_id, src.customer_id, src.order_date,
+    src.total_amount, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+);
+
+-- FACT_ORDER_ITEMS
+
+
+CREATE OR REPLACE TABLE GOLD.FACT_ORDER_ITEMS (
+    order_item_id STRING,
+    order_id STRING,
+    product_id STRING,
+    quantity NUMBER,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+MERGE INTO GOLD.FACT_ORDER_ITEMS tgt
+USING NINJA_DB.SILVER.ORDER_ITEMS src
+ON tgt.order_item_id = src.order_item_id
+
+WHEN MATCHED THEN UPDATE SET
+    tgt.quantity = src.quantity,
+    tgt.updated_at = CURRENT_TIMESTAMP()
+
+WHEN NOT MATCHED THEN
+INSERT (
+    order_item_id,
+    order_id,
+    product_id,
+    quantity,
+    created_at,
+    updated_at
+)
+VALUES (
+    src.order_item_id,
+    src.order_id,
+    src.product_id,
+    src.quantity,
+    CURRENT_TIMESTAMP(),
+    CURRENT_TIMESTAMP()
+);
+
+
+-- FACT_USER_ACTIVITY
+CREATE OR REPLACE TABLE GOLD.FACT_USER_ACTIVITY (
+    activity_id STRING,
+    customer_id STRING,
+    activity_type STRING,
+    activity_time TIMESTAMP,
+    created_at TIMESTAMP
+);
+
+MERGE INTO GOLD.FACT_USER_ACTIVITY tgt
+USING NINJA_DB.SILVER.ACTIVITY src
+ON tgt.activity_id = src.activity_id
+
+WHEN NOT MATCHED THEN
+INSERT (
+    activity_id, customer_id, activity_type,
+    activity_time, created_at
+)
+VALUES (
+    src.activity_id, src.customer_id, src.activity_type,
+    src.activity_time, CURRENT_TIMESTAMP()
+);
+
+
+-- DIM_DATE (Common Date Dimension for all facts)
+CREATE OR REPLACE TABLE GOLD.DIM_DATE AS
+SELECT DISTINCT
+    d.date_value AS date,
+
+    EXTRACT(YEAR FROM d.date_value) AS year,
+    EXTRACT(MONTH FROM d.date_value) AS month,
+    EXTRACT(DAY FROM d.date_value) AS day,
+    EXTRACT(DAYOFWEEK FROM d.date_value) AS day_of_week,
+    EXTRACT(WEEK FROM d.date_value) AS week_of_year,
+    EXTRACT(QUARTER FROM d.date_value) AS quarter,
+
+    TO_VARCHAR(d.date_value, 'DY') AS day_name,
+    TO_VARCHAR(d.date_value, 'MON') AS month_name,
+
+    CASE
+        WHEN EXTRACT(DAYOFWEEK FROM d.date_value) IN (6,7) THEN 'WEEKEND'
+        ELSE 'WEEKDAY'
+    END AS day_type
+
+FROM (
+    SELECT order_date AS date_value FROM GOLD.FACT_ORDERS
+    UNION
+    SELECT DATE(activity_time) FROM GOLD.FACT_USER_ACTIVITY
+) d;
+
+USE ROLE AUTOMATION_ROLE;
+USE WAREHOUSE HACKATHON_WH;
+USE DATABASE NINJA_DB;
+
+
+
+USE SCHEMA BRONZE;
+
+CREATE STREAM STR_CUSTOMERS
+ON TABLE NINJA_DB.BRONZE.CUSTOMERS_RAW;
+
+CREATE STREAM STR_PRODUCTS
+ON TABLE NINJA_DB.BRONZE.PRODUCTS_RAW;
+
+CREATE STREAM STR_ORDERS
+ON TABLE NINJA_DB.BRONZE.ORDERS_RAW;
+
+CREATE STREAM STR_ORDER_ITEMS
+ON TABLE NINJA_DB.BRONZE.ORDER_ITEMS_RAW;
+
+CREATE STREAM STR_USER_ACTIVITY
+ON TABLE NINJA_DB.BRONZE.ACTIVITY_RAW;
